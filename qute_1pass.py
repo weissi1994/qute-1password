@@ -21,14 +21,10 @@ SESSION_DURATION = timedelta(minutes=30)
 LAST_ITEM_PATH = os.path.join(CACHE_DIR, "last_item")
 LAST_ITEM_DURATION = timedelta(seconds=10)
 
-OP_SUBDOMAIN = "my"
-CMD_PASSWORD_PROMPT = (
-    "rofi -password -dmenu -p 'Vault Password' -l 0 -sidebar -width 20"
-)
-CMD_ITEM_SELECT = "echo -e '{items}' | rofi -dmenu -p 'Select login'"
-CMD_LIST_PROMPT = "echo {items} | rofi -dmenu"
+CMD_ITEM_SELECT = "echo -e '{items}' | wofi -d -p 'Select login'"
+CMD_LIST_PROMPT = "echo {items} | wofi -d"
 
-CMD_OP_LOGIN = "echo -n {password} | op signin {subdomain} --output=raw"
+CMD_OP_LOGIN = "echo -n 'ind0r3x!4mindstorms29' | op signin ixolit --output=raw"
 CMD_OP_LIST_ITEMS = "op list items --categories Login --session={session_id}"
 CMD_OP_GET_ITEM = "op get item {uuid} --session={session_id}"
 CMD_OP_GET_TOTP = "op get totp {uuid} --session={session_id}"
@@ -131,15 +127,7 @@ class OnePass:
     @classmethod
     def login(cls):
         try:
-            password = execute_command(CMD_PASSWORD_PROMPT)
-        except ExecuteError:
-            Qute.message_error("Error calling pinentry program")
-            sys.exit(0)
-
-        try:
-            session_id = execute_command(
-                CMD_OP_LOGIN.format(password=password, subdomain=OP_SUBDOMAIN)
-            )
+            session_id = execute_command(CMD_OP_LOGIN)
         except ExecuteError:
             Qute.message_error("Login error")
             sys.exit(0)
