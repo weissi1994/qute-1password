@@ -12,22 +12,19 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger("qute_1pass")
 
-CACHE_DIR = os.path.join(tempfile.gettempdir(), "qute_1pass")
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-SESSION_PATH = os.path.join(CACHE_DIR, "session")
+SESSION_PATH = os.path.join(os.environ['HOME'], ".op", "session")
 SESSION_DURATION = timedelta(minutes=30)
 
-LAST_ITEM_PATH = os.path.join(CACHE_DIR, "last_item")
-LAST_ITEM_DURATION = timedelta(seconds=10)
+LAST_ITEM_PATH = os.path.join(os.environ['HOME'], ".op", "last_items")
+LAST_ITEM_DURATION = timedelta(minutes=10)
 
 CMD_ITEM_SELECT = "echo -e '{items}' | wofi -d -p 'Select login'"
 CMD_LIST_PROMPT = "echo {items} | wofi -d"
 
-CMD_OP_LOGIN = "echo -n 'ind0r3x!4mindstorms29' | op signin ixolit --output=raw"
+CMD_OP_LOGIN = "pass 1pass | op signin ixolit --raw"
 CMD_OP_LIST_ITEMS = "op list items --categories Login --session={session_id}"
 CMD_OP_GET_ITEM = "op get item {uuid} --session={session_id}"
-CMD_OP_GET_TOTP = "op get totp {uuid} --session={session_id}"
+CMD_OP_GET_OTP = "ykman oath accounts code \"$(echo -e \"$(ykman oath accounts list)\" | wofi -d -p 'Select OTP')\" | awk '{print $NF}'| sed 's/ *$//g'"
 
 QUTE_FIFO = os.environ["QUTE_FIFO"]
 
@@ -139,12 +136,12 @@ class OnePass:
         return session_id
 
     @classmethod
-    def get_session(cls):
+    def get_session(cls, use_cache=True):
         """
         Returns a session for the op command to make calls with.
         If a session is cached, we check if it's expired first to avoid any errors.
         """
-        if arguments.cache_session and os.path.isfile(SESSION_PATH):
+        if arguments.cache_session and os.path.isfile(SESSION_PATH) and use_cache:
             # op sessions last 30 minutes, check if still valid
             creation_time = datetime.fromtimestamp(os.stat(SESSION_PATH).st_ctime)
             if (datetime.now() - creation_time) < SESSION_DURATION:
@@ -158,8 +155,21 @@ class OnePass:
     @classmethod
     def list_items(cls):
         session_id = cls.get_session()
+        
+        if arguments.cache_session and os.path.isfile(LAST_ITEM_PATH):
+            # op sessions last 30 minutes, check if still valid
+            creation_time = datetime.fromtimestamp(os.stat(LAST_ITEM_PATH).st_ctime)
+            if (datetime.now() - creation_time) < LAST_ITEM_DURATION:
+                return json.loads(open(LAST_ITEM_PATH, "r").read())
+            else:
+                # Session expired
+                os.unlink(LAST_ITEM_PATH)
+
+
         result = execute_command(CMD_OP_LIST_ITEMS.format(session_id=session_id))
         parsed = json.loads(result)
+        with open(LAST_ITEM_PATH, "w") as handler:
+            handler.write(json.dumps(parsed))
         return parsed
 
     @classmethod
@@ -188,7 +198,7 @@ class OnePass:
         items = cls.list_items()
         filtered = filter(filter_host, items)
         mapping = {
-            f"{host}: {item['overview']['title']} ({item['uuid']})": item
+            f"{host}: {item['overview']['title']} ({item['overview']['ainfo']})": item
             for item in filtered
         }
 
@@ -228,11 +238,10 @@ class OnePass:
         return {"username": username, "password": password}
 
     @classmethod
-    def get_totp(cls, uuid):
-        session_id = cls.get_session()
+    def get_totp(cls):
         try:
             return execute_command(
-                CMD_OP_GET_TOTP.format(uuid=uuid, session_id=session_id)
+                CMD_OP_GET_OTP
             )
         except ExecuteError:
             logger.error("Error retrieving TOTP", exc_info=True)
@@ -260,15 +269,6 @@ class CLI:
             sys.exit(0)
         return item
 
-    def _store_last_item(self, item):
-        """
-        Stores a reference to an item to easily get single information from it (password, TOTP)
-        right after filling the username or credentials.
-        """
-        last_item = {"host": extract_host(os.environ["QUTE_URL"]), "uuid": item["uuid"]}
-        with open(LAST_ITEM_PATH, "w") as handler:
-            handler.write(json.dumps(last_item))
-
     def _fill_single_field(self, field):
         item = self._get_item()
         credentials = OnePass.get_credentials(item)
@@ -279,38 +279,35 @@ class CLI:
 
     def fill_username(self):
         item = self._fill_single_field("username")
-        self._store_last_item(item)
 
     def fill_password(self):
         item = self._fill_single_field("password")
-        self._store_last_item(item)
 
-    def fill_credentials(self):
+    def fill_credentials(self):  
         item = self._get_item()
         credentials = OnePass.get_credentials(item)
         Qute.fill_credentials_tabmode(
             *credentials.values(), submit=self.arguments.auto_submit
         )
-        self._store_last_item(item)
 
     def fill_totp(self):
         # Check last item first
         # If theres a last_item file created in the last LAST_ITEM_DURATION seconds
         # and the host matches the one the user is visiting, use that UUID to retrieve
         # the totp
-        item = None
+        #item = None
 
-        if os.path.isfile(LAST_ITEM_PATH):
-            creation_time = datetime.fromtimestamp(os.stat(LAST_ITEM_PATH).st_ctime)
-            if (datetime.now() - creation_time) < LAST_ITEM_DURATION:
-                last_item = json.loads(open(LAST_ITEM_PATH, "r").read())
-                if last_item["host"] == extract_host(os.environ["QUTE_URL"]):
-                    item = last_item
+        #if os.path.isfile(LAST_ITEM_PATH):
+        #    creation_time = datetime.fromtimestamp(os.stat(LAST_ITEM_PATH).st_ctime)
+        #    if (datetime.now() - creation_time) < LAST_ITEM_DURATION:
+        #        last_item = json.loads(open(LAST_ITEM_PATH, "r").read())
+        #        if last_item["host"] == extract_host(os.environ["QUTE_URL"]):
+        #            item = last_item
 
-        if not item:
-            item = self._get_item()
+        #if not item:
+        #    item = self._get_item()
 
-        totp = OnePass.get_totp(item["uuid"])
+        totp = OnePass.get_totp()
         logger.error(totp)
         Qute.fill_totp(totp)
 
