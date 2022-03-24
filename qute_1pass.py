@@ -12,18 +12,18 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger("qute_1pass")
 
-SESSION_PATH = os.path.join(os.environ['HOME'], ".op", "session")
-SESSION_DURATION = timedelta(minutes=30)
+SESSION_PATH = os.path.join(os.environ["HOME"], ".op", "session")
+SESSION_DURATION = timedelta(minutes=120)
 
-LAST_ITEM_PATH = os.path.join(os.environ['HOME'], ".op", "last_items")
-LAST_ITEM_DURATION = timedelta(minutes=10)
+LAST_ITEM_PATH = os.path.join(os.environ["HOME"], ".op", "last_items")
+LAST_ITEM_DURATION = timedelta(minutes=60)
 
 CMD_ITEM_SELECT = "echo -e '{items}' | wofi -d -p 'Select login'"
 CMD_LIST_PROMPT = "echo {items} | wofi -d"
 
-CMD_OP_LOGIN = "pass 1pass | op signin ixolit --raw"
-CMD_OP_LIST_ITEMS = "op list items --categories Login --session={session_id}"
-CMD_OP_GET_ITEM = "op get item {uuid} --session={session_id}"
+CMD_OP_LOGIN = "pass 1pass | op signin --account ixolit --raw"
+CMD_OP_LIST_ITEMS = "op item list --categories Login --session={session_id} --format=json | op item get --session={session_id} - --format json | jq -s 'reduce . as $x ([]; . + $x)'"
+CMD_OP_GET_ITEM = "op item get {uuid} --session={session_id} --format json"
 CMD_OP_GET_OTP = "ykman oath accounts code \"$(echo -e \"$(ykman oath accounts list)\" | wofi -d -p 'Select OTP')\" | awk '{print $NF}'| sed 's/ *$//g'"
 
 QUTE_FIFO = os.environ["QUTE_FIFO"]
@@ -155,18 +155,20 @@ class OnePass:
     @classmethod
     def list_items(cls):
         session_id = cls.get_session()
-        
+
         if arguments.cache_session and os.path.isfile(LAST_ITEM_PATH):
             # op sessions last 30 minutes, check if still valid
             creation_time = datetime.fromtimestamp(os.stat(LAST_ITEM_PATH).st_ctime)
-            if (datetime.now() - creation_time) < LAST_ITEM_DURATION:
+            file_size = os.stat(LAST_ITEM_PATH).st_size
+            if (datetime.now() - creation_time) < LAST_ITEM_DURATION and file_size > 2:
                 return json.loads(open(LAST_ITEM_PATH, "r").read())
             else:
                 # Session expired
                 os.unlink(LAST_ITEM_PATH)
 
-
+        print(CMD_OP_LIST_ITEMS.format(session_id=session_id))
         result = execute_command(CMD_OP_LIST_ITEMS.format(session_id=session_id))
+        print(result)
         parsed = json.loads(result)
         with open(LAST_ITEM_PATH, "w") as handler:
             handler.write(json.dumps(parsed))
@@ -191,20 +193,24 @@ class OnePass:
 
         def filter_host(item):
             """Exclude items that does not match host on any configured URL"""
-            if "URLs" in item["overview"]:
-                return any(filter(lambda x: host in x["u"], item["overview"]["URLs"]))
+            if "urls" in item:
+                return any(filter(lambda x: host in x["href"], item["urls"]))
             return False
 
         items = cls.list_items()
-        filtered = filter(filter_host, items)
+        print(items)
+        filtered = list(filter(filter_host, items))
+        print(filtered)
+
+        if not filtered:
+            raise cls.NoItemsFoundError(f"No items found for host {host}")
+
         mapping = {
-            f"{host}: {item['overview']['title']} ({item['overview']['ainfo']})": item
+            f"{host}: {item['title']} ({item['fields'][0]['value']})": item
             for item in filtered
         }
 
-        if not mapping:
-            raise cls.NoItemsFoundError(f"No items found for host {host}")
-
+        credential = None
         try:
             credential = execute_command(
                 CMD_ITEM_SELECT.format(items="\n".join(mapping.keys()))
@@ -216,15 +222,16 @@ class OnePass:
             # Cancelled
             return
 
-        return cls.get_item(mapping[credential]["uuid"])
+        return mapping[credential]
 
     @classmethod
     def get_credentials(cls, item):
         username = password = None
-        for field in item["details"]["fields"]:
-            if field.get("designation") == "username":
+        print(item)
+        for field in item["fields"]:
+            if field.get("id") == "username":
                 username = field["value"]
-            if field.get("designation") == "password":
+            if field.get("id") == "password":
                 password = field["value"]
 
         if username is None or password is None:
@@ -240,9 +247,7 @@ class OnePass:
     @classmethod
     def get_totp(cls):
         try:
-            return execute_command(
-                CMD_OP_GET_OTP
-            )
+            return execute_command(CMD_OP_GET_OTP)
         except ExecuteError:
             logger.error("Error retrieving TOTP", exc_info=True)
 
@@ -283,7 +288,7 @@ class CLI:
     def fill_password(self):
         item = self._fill_single_field("password")
 
-    def fill_credentials(self):  
+    def fill_credentials(self):
         item = self._get_item()
         credentials = OnePass.get_credentials(item)
         Qute.fill_credentials_tabmode(
@@ -295,16 +300,16 @@ class CLI:
         # If theres a last_item file created in the last LAST_ITEM_DURATION seconds
         # and the host matches the one the user is visiting, use that UUID to retrieve
         # the totp
-        #item = None
+        # item = None
 
-        #if os.path.isfile(LAST_ITEM_PATH):
+        # if os.path.isfile(LAST_ITEM_PATH):
         #    creation_time = datetime.fromtimestamp(os.stat(LAST_ITEM_PATH).st_ctime)
         #    if (datetime.now() - creation_time) < LAST_ITEM_DURATION:
         #        last_item = json.loads(open(LAST_ITEM_PATH, "r").read())
         #        if last_item["host"] == extract_host(os.environ["QUTE_URL"]):
         #            item = last_item
 
-        #if not item:
+        # if not item:
         #    item = self._get_item()
 
         totp = OnePass.get_totp()
